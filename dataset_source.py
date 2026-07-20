@@ -122,59 +122,97 @@ def _copy_class_tree(src_split: Path, dst_split: Path, normalize_names: bool) ->
     return count
 
 
+def _is_class_dataset_root(path: Path) -> bool:
+    """True if path/train/<class>/*.jpg style (not YOLO train/images)."""
+    train = path / "train"
+    if not train.is_dir():
+        return False
+    for child in train.iterdir():
+        if child.is_dir() and child.name != "images":
+            return True
+    return False
+
+
 def normalize_dataset_layout(script_dir: Path) -> bool:
     """
     Ensure training_data/dataset_organized/{100.v1i.folder|classification} exists.
+    Never copytree a parent into its own child (avoids infinite nesting).
     """
     training_data = script_dir / "training_data"
+    training_data.mkdir(parents=True, exist_ok=True)
     organized = training_data / "dataset_organized"
-    organized.mkdir(parents=True, exist_ok=True)
 
-    if dataset_ready(script_dir):
-        return True
+    # Already good and not a nested mess
+    robo_train = organized / "100.v1i.folder" / "train"
+    if robo_train.is_dir() and _is_class_dataset_root(organized / "100.v1i.folder"):
+        # Guard against nested path pollution
+        nested = organized / "100.v1i.folder" / "dataset_organized"
+        if nested.exists():
+            print("[WARN] Removing nested dataset_organized junk inside 100.v1i.folder", flush=True)
+            shutil.rmtree(nested, ignore_errors=True)
+        if (organized / "classification" / "train").is_dir() or (organized / "data.yaml").exists():
+            return True
 
-    candidates = [
-        training_data / "Dataset20260715folder",
-        script_dir / "Dataset20260715folder",
-        training_data / "100.v1i.folder",
-        organized / "Dataset20260715folder",
-        training_data / "dataset_organized",  # maybe train/ is directly here
-    ]
-
-    # Also search one level for any folder containing train/<classes>
-    for root in [training_data, script_dir, organized]:
-        if not root.exists():
-            continue
-        for child in root.iterdir():
-            if child.is_dir() and (child / "train").is_dir():
+    candidates: list[Path] = []
+    # Flat ZIP extract: training_data/train/...
+    if _is_class_dataset_root(training_data):
+        candidates.append(training_data)
+    for name in (
+        "Dataset20260715folder",
+        "100.v1i.folder",
+        "dataset",
+    ):
+        p = training_data / name
+        if _is_class_dataset_root(p):
+            candidates.append(p)
+    # One-level children (skip organized / temp)
+    if training_data.exists():
+        for child in training_data.iterdir():
+            if not child.is_dir():
+                continue
+            if child.name in ("dataset_organized", "_drive_download", "_extract"):
+                continue
+            if _is_class_dataset_root(child):
                 candidates.append(child)
+    # Existing good robo folder
+    if _is_class_dataset_root(organized / "100.v1i.folder"):
+        candidates.append(organized / "100.v1i.folder")
 
-    source = None
-    for cand in candidates:
-        if cand.is_dir() and (cand / "train").is_dir():
-            # Prefer folder-style class datasets (not YOLO train/images)
-            sample = next((cand / "train").iterdir(), None)
-            if sample and sample.is_dir() and sample.name != "images":
-                source = cand
-                break
-
+    source = candidates[0] if candidates else None
     if source is None:
+        print("[ERROR] No class-folder dataset root found after extract", flush=True)
+        print(f"[DEBUG] training_data contents: {list(training_data.iterdir()) if training_data.exists() else 'missing'}", flush=True)
         return False
 
     print(f"[INFO] Normalizing dataset from: {source}", flush=True)
 
-    # 100.v1i.folder (keep original folder class names for Roboflow path)
-    robo = organized / "100.v1i.folder"
-    if robo.exists():
-        shutil.rmtree(robo)
-    shutil.copytree(source, robo)
+    # Rebuild organized cleanly
+    if organized.exists():
+        shutil.rmtree(organized)
+    organized.mkdir(parents=True)
 
-    # classification with normalized class codes + val from valid
+    robo = organized / "100.v1i.folder"
+    robo.mkdir(parents=True)
+
+    # Move/copy only the split folders — never the whole training_data tree
+    for split in ("train", "valid", "test", "val"):
+        src_split = source / split
+        if not src_split.is_dir():
+            continue
+        dest_name = "valid" if split == "val" else split
+        dest_split = robo / dest_name
+        if dest_split.exists():
+            shutil.rmtree(dest_split)
+        shutil.copytree(src_split, dest_split)
+
+    if not (robo / "train").is_dir():
+        print("[ERROR] Normalization failed: no train/ under 100.v1i.folder", flush=True)
+        return False
+
+    # classification with normalized class codes
     class_root = organized / "classification"
-    if class_root.exists():
-        shutil.rmtree(class_root)
-    n_train = _copy_class_tree(source / "train", class_root / "train", True)
-    valid_src = source / "valid" if (source / "valid").exists() else source / "val"
+    n_train = _copy_class_tree(robo / "train", class_root / "train", True)
+    valid_src = robo / "valid" if (robo / "valid").exists() else robo / "val"
     n_val = _copy_class_tree(valid_src, class_root / "val", True)
 
     yaml_path = organized / "data.yaml"
@@ -266,6 +304,9 @@ def download_external_dataset_zip(script_dir: Path, logger=None) -> bool:
         return True
 
     training_data = script_dir / "training_data"
+    # Clean slate so old nested paths cannot poison normalize()
+    if training_data.exists():
+        shutil.rmtree(training_data, ignore_errors=True)
     training_data.mkdir(parents=True, exist_ok=True)
 
     print(f"[INFO] Using external dataset source (DATASET_ZIP_URL)", flush=True)
