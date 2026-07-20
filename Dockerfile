@@ -17,4 +17,5 @@ ENV PORT=8080
 
 EXPOSE 8080
 
-CMD gunicorn app:app --bind 0.0.0.0:${PORT} --workers 1 --threads 4 --timeout 120
+# Shell form so $PORT expands (Railway Dockerfile startCommand uses exec form otherwise)
+CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-8080} --workers 1 --threads 4 --timeout 120"]
