@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py train.py train_classification.py Procfile ./
+COPY app.py train.py train_classification.py dataset_source.py Procfile ./
 
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080

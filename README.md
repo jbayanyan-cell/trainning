@@ -57,16 +57,34 @@ Expect `"status":"ok"` and `"php_api":"connected"`.
 
 Then in admin → Training → **Start Training**.
 
-## 5. After training finishes
+## Option 2: External dataset ZIP (no Hostinger image folder)
 
-Models tab → **Deploy** so ONNX syncs for Vercel detection.
+1. Zip `Dataset20260715folder` on your PC **or** share the folder on Google Drive.
+2. In Railway → Variables set either:
+
+```
+# Folder (what you have now):
+DATASET_ZIP_URL=https://drive.google.com/drive/folders/1H_TDkyyCZus54yH92vgFVwsjsSPK5Z1Y?usp=sharing
+
+# OR a single ZIP file share link:
+# DATASET_ZIP_URL=https://drive.google.com/file/d/YOUR_FILE_ID/view?usp=sharing
+```
+
+(Drive folder links are downloaded with `gdown`. Sharing must be **Anyone with the link**.)
+
+4. Redeploy Railway after pushing `dataset_source.py`.
+5. On the PHP site, keep `$USE_EXTERNAL_DATASET_ZIP = true` in `training_service_config.php`.
+6. Admin → **Start Training** — Railway downloads the ZIP, trains, uploads ONNX back via PHP.
+
+Later improvements: replace the ZIP with a newer one (captures added), update the Drive file / URL, train again.
+
 
 ## Flow
 
 ```
 Admin Start Training
   → PHP creates job + POST Railway /train
-  → Railway downloads dataset ZIP from PHP
+  → Railway downloads DATASET_ZIP_URL (or PHP dataset ZIP)
   → Trains (CPU PyTorch)
   → Uploads ONNX via upload_model.php
   → Admin Deploy → Vercel serves new model

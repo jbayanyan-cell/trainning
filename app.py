@@ -217,6 +217,15 @@ def health():
             "php_api": "connected" if php_ok else "unreachable",
             "php_api_base": PHP_API_BASE,
             "php_http_code": r.status_code,
+            "dataset_zip_configured": bool(
+                os.getenv("DATASET_ZIP_URL", "").strip() or os.getenv("DATASET_URL", "").strip()
+            ),
+            "dataset_zip_url_preview": (
+                (os.getenv("DATASET_ZIP_URL", "") or os.getenv("DATASET_URL", "") or "")[:60] + "..."
+                if (os.getenv("DATASET_ZIP_URL", "") or os.getenv("DATASET_URL", ""))
+                else None
+            ),
+            "code_version": "dataset-drive-v2",
         }
         return jsonify(payload), (200 if php_ok else 503)
     except Exception as exc:

@@ -1097,25 +1097,48 @@ def load_classes_from_yaml(yaml_path):
         return None
 
 def download_dataset_from_server(script_dir, logger, job_id=None, farm_id=None, selected_pests=None):
-    """Download organized dataset from web server if not available locally"""
+    """Download organized dataset from DATASET_ZIP_URL (preferred) or PHP API."""
     try:
         import requests
         import zipfile
         import tempfile
-        
-        # Check if dataset already exists locally (data.yaml is optional for classification)
-        organized_dir = script_dir / "training_data" / "dataset_organized"
-        # Check if dataset exists (either with data.yaml or with classification/100.v1i.folder structure)
-        has_dataset = organized_dir.exists() and (
-            (organized_dir / "data.yaml").exists() or
-            (organized_dir / "classification" / "train").exists() or
-            (organized_dir / "100.v1i.folder" / "train").exists()
+
+        from dataset_source import (
+            dataset_ready,
+            download_external_dataset_zip,
+            normalize_dataset_layout,
         )
+
+        script_dir = Path(script_dir)
+        external_url = os.getenv("DATASET_ZIP_URL", "").strip() or os.getenv("DATASET_URL", "").strip()
+
+        # Option 2: external Drive/ZIP — must succeed when configured (no silent PHP fallback)
+        try:
+            if download_external_dataset_zip(script_dir, logger=logger):
+                return True
+        except RuntimeError as ext_err:
+            print(f"[ERROR] {ext_err}", flush=True)
+            logger.error(str(ext_err))
+            return False
+
+        if external_url:
+            # URL set but returned False unexpectedly
+            print("[ERROR] DATASET_ZIP_URL is set but dataset is not ready", flush=True)
+            return False
+
+        # Normalize any leftover extract from a previous run
+        if normalize_dataset_layout(script_dir):
+            print("[INFO] Using normalized local dataset", flush=True)
+            return True
+
+        # Check if dataset already exists locally
+        organized_dir = script_dir / "training_data" / "dataset_organized"
+        has_dataset = dataset_ready(script_dir)
         if has_dataset:
             print("[INFO] Dataset already exists locally, skipping download", flush=True)
             return True
         
-        # Get PHP API base URL
+        # Get PHP API base URL (only when no DATASET_ZIP_URL)
         php_api_base = os.getenv('PHP_API_BASE', 'https://agrishield.bccbsis.com/api/training')
         download_url = f"{php_api_base}/download_dataset.php?format=zip"
         
@@ -1197,6 +1220,23 @@ def download_dataset_from_server(script_dir, logger, job_id=None, farm_id=None, 
         if zip_size < 1024:  # Less than 1KB is suspicious
             print(f"[ERROR] Downloaded ZIP file is too small ({zip_size} bytes). Dataset may be empty on server.", flush=True)
             logger.error(f"Downloaded ZIP file is too small: {zip_size} bytes")
+            os.unlink(tmp_zip_path)
+            return False
+
+        with open(tmp_zip_path, 'rb') as _zf:
+            magic = _zf.read(4)
+        if magic[:2] != b'PK':
+            # Hostinger often returns JSON/HTML error pages with 200
+            preview = ''
+            try:
+                with open(tmp_zip_path, 'rb') as _zf:
+                    preview = _zf.read(200).decode('utf-8', errors='replace')
+            except Exception:
+                pass
+            print("[ERROR] PHP download_dataset.php did not return a ZIP file.", flush=True)
+            print(f"[ERROR] Preview: {preview[:180]}", flush=True)
+            print("[ERROR] Set Railway DATASET_ZIP_URL to your Google Drive folder instead.", flush=True)
+            logger.error("Downloaded file is not a zip file")
             os.unlink(tmp_zip_path)
             return False
         
@@ -1465,8 +1505,8 @@ def create_combined_dataset(logger, job_id=None):
     needs_download = True
     
     if needs_download:
-        print("[INFO] Downloading fresh dataset from server...", flush=True)
-        print(f"[INFO] This ensures training uses the latest images from database", flush=True)
+        print("[INFO] Downloading fresh dataset (DATASET_ZIP_URL or PHP)...", flush=True)
+        print(f"[INFO] Prefer Google Drive if DATASET_ZIP_URL is set on Railway", flush=True)
         logger.info("Downloading fresh dataset from server")
         
         # Get job_id from args if available
