@@ -24,6 +24,15 @@ from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 
+CLASS_NAME_MAP = {
+    "black bug": "black_bug",
+    "brown hopper": "brown_hopper",
+    "green hopper": "green_hopper",
+    "ricebug": "rice_bug",
+    "rice bug": "rice_bug",
+    "white stem borer": "white_stem_borer",
+}
+
 # Default: Google Drive FILE link to Dataset20260715folder.zip (not a folder).
 DEFAULT_DATASET_ZIP_URL = (
     "https://drive.google.com/file/d/1xJHs0Jsy6pXJOsv_RApupq8X49JeiPM9/view?usp=sharing"
