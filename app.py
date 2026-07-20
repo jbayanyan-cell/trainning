@@ -210,6 +210,14 @@ def health():
         # job_id=0 returns 400 from get_job.php when PHP is reachable
         r = php_get("get_job.php", {"job_id": 0}, timeout=12)
         php_ok = r.status_code in (200, 400, 404)
+        from dataset_source import get_dataset_zip_url, DEFAULT_DATASET_ZIP_URL
+
+        ds_url = get_dataset_zip_url()
+        env_raw = {
+            "DATASET_ZIP_URL": bool((os.getenv("DATASET_ZIP_URL") or "").strip()),
+            "DATASET_URL": bool((os.getenv("DATASET_URL") or "").strip()),
+            "DATASET_DRIVE_URL": bool((os.getenv("DATASET_DRIVE_URL") or "").strip()),
+        }
         payload = {
             "status": "ok" if php_ok else "error",
             "service": "training-service",
@@ -217,15 +225,12 @@ def health():
             "php_api": "connected" if php_ok else "unreachable",
             "php_api_base": PHP_API_BASE,
             "php_http_code": r.status_code,
-            "dataset_zip_configured": bool(
-                os.getenv("DATASET_ZIP_URL", "").strip() or os.getenv("DATASET_URL", "").strip()
-            ),
-            "dataset_zip_url_preview": (
-                (os.getenv("DATASET_ZIP_URL", "") or os.getenv("DATASET_URL", "") or "")[:60] + "..."
-                if (os.getenv("DATASET_ZIP_URL", "") or os.getenv("DATASET_URL", ""))
-                else None
-            ),
-            "code_version": "dataset-drive-v2",
+            "dataset_zip_configured": bool(ds_url),
+            "dataset_from_env": any(env_raw.values()),
+            "dataset_env_flags": env_raw,
+            "dataset_using_builtin_default": bool(ds_url) and not any(env_raw.values()),
+            "dataset_zip_url_preview": (ds_url[:70] + "...") if ds_url else None,
+            "code_version": "dataset-drive-v3",
         }
         return jsonify(payload), (200 if php_ok else 503)
     except Exception as exc:

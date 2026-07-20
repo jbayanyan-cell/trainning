@@ -14,6 +14,7 @@ COPY app.py train.py train_classification.py dataset_source.py Procfile ./
 
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
+ENV DATASET_ZIP_URL=https://drive.google.com/drive/folders/1H_TDkyyCZus54yH92vgFVwsjsSPK5Z1Y?usp=sharing
 
 EXPOSE 8080
 

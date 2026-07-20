@@ -24,14 +24,25 @@ from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 
-CLASS_NAME_MAP = {
-    "black bug": "black_bug",
-    "brown hopper": "brown_hopper",
-    "green hopper": "green_hopper",
-    "ricebug": "rice_bug",
-    "rice bug": "rice_bug",
-    "white stem borer": "white_stem_borer",
-}
+# Default starter dataset (Google Drive folder). Override with Railway Variable DATASET_ZIP_URL.
+DEFAULT_DATASET_ZIP_URL = (
+    "https://drive.google.com/drive/folders/1H_TDkyyCZus54yH92vgFVwsjsSPK5Z1Y?usp=sharing"
+)
+
+
+def get_dataset_zip_url() -> str:
+    """Resolve dataset URL from env (several aliases) or built-in default."""
+    for key in (
+        "DATASET_ZIP_URL",
+        "DATASET_URL",
+        "DATASET_DRIVE_URL",
+        "GOOGLE_DRIVE_DATASET_URL",
+    ):
+        val = (os.getenv(key) or "").strip().strip('"').strip("'")
+        if val:
+            return val
+    return DEFAULT_DATASET_ZIP_URL
+
 
 
 def resolve_dataset_zip_url(url: str) -> str:
@@ -223,11 +234,22 @@ def download_external_dataset_zip(script_dir: Path, logger=None) -> bool:
     Returns False only when DATASET_ZIP_URL is unset (caller may try PHP).
     Raises RuntimeError when URL is set but download/normalize fails.
     """
-    url = os.getenv("DATASET_ZIP_URL", "").strip() or os.getenv("DATASET_URL", "").strip()
+    url = get_dataset_zip_url()
     if not url:
         print("[WARN] DATASET_ZIP_URL is not set — will try PHP download_dataset.php", flush=True)
         return False
 
+    env_set = bool(
+        (os.getenv("DATASET_ZIP_URL") or "").strip()
+        or (os.getenv("DATASET_URL") or "").strip()
+        or (os.getenv("DATASET_DRIVE_URL") or "").strip()
+    )
+    if not env_set:
+        print(
+            "[INFO] Using built-in default Drive folder URL "
+            "(set Railway Variable DATASET_ZIP_URL to override)",
+            flush=True,
+        )
     if dataset_ready(script_dir):
         print("[INFO] Dataset already present; skipping DATASET_ZIP_URL download", flush=True)
         return True

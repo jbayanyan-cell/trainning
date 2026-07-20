@@ -1106,11 +1106,12 @@ def download_dataset_from_server(script_dir, logger, job_id=None, farm_id=None, 
         from dataset_source import (
             dataset_ready,
             download_external_dataset_zip,
+            get_dataset_zip_url,
             normalize_dataset_layout,
         )
 
         script_dir = Path(script_dir)
-        external_url = os.getenv("DATASET_ZIP_URL", "").strip() or os.getenv("DATASET_URL", "").strip()
+        external_url = get_dataset_zip_url()
 
         # Option 2: external Drive/ZIP — must succeed when configured (no silent PHP fallback)
         try:
