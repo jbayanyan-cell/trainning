@@ -230,7 +230,7 @@ def health():
             "dataset_env_flags": env_raw,
             "dataset_using_builtin_default": bool(ds_url) and not any(env_raw.values()),
             "dataset_zip_url_preview": (ds_url[:70] + "...") if ds_url else None,
-            "code_version": "dataset-zip-v7",
+            "code_version": "dataset-zip-v8",
         }
         return jsonify(payload), (200 if php_ok else 503)
     except Exception as exc:

@@ -1622,145 +1622,123 @@ def create_combined_dataset(logger, job_id=None):
         print(f"[INFO] No data.yaml found (optional for classification), will detect classes from folder structure", flush=True)
         logger.info("No data.yaml found, will detect classes from folder structure")
     
-    # PRIORITY 0.3: Check for 100.v1i.folder structure (original Roboflow dataset)
-    # Convert it to classification format
+    # PRIORITY 0.3: Prefer already-normalized classification/ (from dataset_source)
+    # before re-converting 100.v1i.folder — avoids duplicate hopper aliases.
+    classification_train_dir = organized_dir / "classification" / "train"
+    classification_val_dir = organized_dir / "classification" / "val"
+
+    def _count_images_in_class_dirs(root: Path) -> int:
+        if not root.exists():
+            return 0
+        total = 0
+        for class_dir in root.iterdir():
+            if class_dir.is_dir():
+                total += len(
+                    list(class_dir.glob("*.jpg"))
+                    + list(class_dir.glob("*.jpeg"))
+                    + list(class_dir.glob("*.png"))
+                )
+        return total
+
+    train_images_count = _count_images_in_class_dirs(classification_train_dir)
+    val_images_count = _count_images_in_class_dirs(classification_val_dir)
+
+    if train_images_count > 0 or val_images_count > 0:
+        print(f"[OK] Found classification format dataset", flush=True)
+        print(f"  Train images: {train_images_count}, Val images: {val_images_count}", flush=True)
+        logger.info(
+            f"Using existing classification format dataset: {train_images_count} train, {val_images_count} val"
+        )
+        if pest_classes:
+            print(f"  Using classes from data.yaml: {pest_classes}", flush=True)
+            return classification_train_dir, classification_val_dir, pest_classes
+        detected_classes = sorted(
+            [d.name for d in classification_train_dir.iterdir() if d.is_dir()]
+        )
+        if detected_classes:
+            print(f"  Detected classes from directory: {detected_classes}", flush=True)
+            logger.info(f"Detected classes from directory: {detected_classes}")
+            return classification_train_dir, classification_val_dir, detected_classes
+
+    # PRIORITY 0.4: Convert 100.v1i.folder only when classification/ is missing
     roboflow_dir = organized_dir / "100.v1i.folder"
     if roboflow_dir.exists():
         roboflow_train = roboflow_dir / "train"
         roboflow_valid = roboflow_dir / "valid"
-        
+
         if roboflow_train.exists() or roboflow_valid.exists():
-            print(f"[INFO] Found 100.v1i.folder structure, converting to classification format...", flush=True)
+            from dataset_source import canonical_class_name
+
+            print(
+                "[INFO] Found 100.v1i.folder structure, converting to classification format...",
+                flush=True,
+            )
             logger.info("Found 100.v1i.folder structure, converting to classification format")
-            
-            # Folder name mappings: Roboflow name => System name
-            folder_mappings = {
-                'black bug': 'black_bug',
-                'brown hopper': 'brown_planthopper',
-                'green hopper': 'green_leafhopper',
-                'ricebug': 'rice_bug',
-                'white stem borer': 'white_stem_borer'
-            }
-            
-            # Create classification structure
-            classification_train_dir = organized_dir / "classification" / "train"
-            classification_val_dir = organized_dir / "classification" / "val"
+
+            # Rebuild cleanly so alias folders cannot coexist
+            classification_root = organized_dir / "classification"
+            if classification_root.exists():
+                shutil.rmtree(classification_root)
+            classification_train_dir = classification_root / "train"
+            classification_val_dir = classification_root / "val"
             classification_train_dir.mkdir(parents=True, exist_ok=True)
             classification_val_dir.mkdir(parents=True, exist_ok=True)
-            
+
             train_count = 0
             val_count = 0
             classes_found = []
-            
-            # Process train folder
-            if roboflow_train.exists():
-                print(f"[DEBUG] Processing train folder: {roboflow_train}", flush=True)
-                class_dirs = list(roboflow_train.iterdir())
-                print(f"[DEBUG] Found {len(class_dirs)} items in train folder", flush=True)
-                
-                for roboflow_class_dir in class_dirs:
+
+            def _convert_split(src_root: Path, dst_root: Path) -> int:
+                copied = 0
+                if not src_root.exists():
+                    return 0
+                for roboflow_class_dir in src_root.iterdir():
                     if not roboflow_class_dir.is_dir():
-                        print(f"[DEBUG] Skipping non-directory: {roboflow_class_dir.name}", flush=True)
                         continue
-                    
-                    roboflow_class_name = roboflow_class_dir.name
-                    print(f"[DEBUG] Processing class: '{roboflow_class_name}'", flush=True)
-                    
-                    # Map to system class name
-                    system_class_name = folder_mappings.get(roboflow_class_name.lower(), roboflow_class_name.lower().replace(' ', '_'))
-                    print(f"[DEBUG] Mapped '{roboflow_class_name}' -> '{system_class_name}'", flush=True)
-                    
+                    system_class_name = canonical_class_name(roboflow_class_dir.name)
                     if system_class_name not in classes_found:
                         classes_found.append(system_class_name)
-                    
-                    # Create system class directory
-                    system_train_dir = classification_train_dir / system_class_name
-                    system_train_dir.mkdir(exist_ok=True)
-                    
-                    # Copy images
-                    image_files = list(roboflow_class_dir.glob('*.jpg')) + list(roboflow_class_dir.glob('*.jpeg')) + list(roboflow_class_dir.glob('*.png'))
-                    print(f"[DEBUG] Found {len(image_files)} images in '{roboflow_class_name}'", flush=True)
-                    
+                    system_dir = dst_root / system_class_name
+                    system_dir.mkdir(exist_ok=True)
+                    image_files = (
+                        list(roboflow_class_dir.glob("*.jpg"))
+                        + list(roboflow_class_dir.glob("*.jpeg"))
+                        + list(roboflow_class_dir.glob("*.png"))
+                    )
                     for img_file in image_files:
-                        dest = system_train_dir / img_file.name
+                        dest = system_dir / img_file.name
                         if not dest.exists():
                             shutil.copy2(img_file, dest)
-                            train_count += 1
-            
-            # Process valid folder
-            if roboflow_valid.exists():
-                print(f"[DEBUG] Processing valid folder: {roboflow_valid}", flush=True)
-                class_dirs = list(roboflow_valid.iterdir())
-                print(f"[DEBUG] Found {len(class_dirs)} items in valid folder", flush=True)
-                
-                for roboflow_class_dir in class_dirs:
-                    if not roboflow_class_dir.is_dir():
-                        print(f"[DEBUG] Skipping non-directory: {roboflow_class_dir.name}", flush=True)
-                        continue
-                    
-                    roboflow_class_name = roboflow_class_dir.name
-                    print(f"[DEBUG] Processing class: '{roboflow_class_name}'", flush=True)
-                    
-                    # Map to system class name
-                    system_class_name = folder_mappings.get(roboflow_class_name.lower(), roboflow_class_name.lower().replace(' ', '_'))
-                    print(f"[DEBUG] Mapped '{roboflow_class_name}' -> '{system_class_name}'", flush=True)
-                    
-                    # Create system class directory
-                    system_val_dir = classification_val_dir / system_class_name
-                    system_val_dir.mkdir(exist_ok=True)
-                    
-                    # Copy images
-                    image_files = list(roboflow_class_dir.glob('*.jpg')) + list(roboflow_class_dir.glob('*.jpeg')) + list(roboflow_class_dir.glob('*.png'))
-                    print(f"[DEBUG] Found {len(image_files)} images in '{roboflow_class_name}'", flush=True)
-                    
-                    for img_file in image_files:
-                        dest = system_val_dir / img_file.name
-                        if not dest.exists():
-                            shutil.copy2(img_file, dest)
-                            val_count += 1
-            
+                            copied += 1
+                return copied
+
+            train_count = _convert_split(roboflow_train, classification_train_dir)
+            val_count = _convert_split(roboflow_valid, classification_val_dir)
+
             print(f"[DEBUG] Classes found during conversion: {classes_found}", flush=True)
-            
+
             if train_count > 0 or val_count > 0:
-                print(f"[OK] Converted 100.v1i.folder to classification format: {train_count} train, {val_count} val", flush=True)
-                logger.info(f"Converted 100.v1i.folder to classification format: {train_count} train, {val_count} val")
-                
-                # Extract classes from created structure
-                detected_classes = sorted([d.name for d in classification_train_dir.iterdir() if d.is_dir()])
+                detected_classes = sorted(
+                    [d.name for d in classification_train_dir.iterdir() if d.is_dir()]
+                )
+                # Keep data.yaml in sync with canonical classes
+                yaml_path = organized_dir / "data.yaml"
+                with open(yaml_path, "w", encoding="utf-8") as f:
+                    f.write("names:\n")
+                    for i, c in enumerate(detected_classes):
+                        f.write(f"  {i}: {c}\n")
+                    f.write(f"nc: {len(detected_classes)}\n")
+
+                print(
+                    f"[OK] Converted 100.v1i.folder to classification format: {train_count} train, {val_count} val",
+                    flush=True,
+                )
+                logger.info(
+                    f"Converted 100.v1i.folder to classification format: {train_count} train, {val_count} val"
+                )
                 if detected_classes:
                     print(f"  Detected classes: {detected_classes}", flush=True)
                     logger.info(f"Detected classes: {detected_classes}")
-                    return classification_train_dir, classification_val_dir, detected_classes
-    
-    # PRIORITY 0.5: Check if classification format already exists (from database export)
-    # This is the format created by export_dataset_function.php
-    classification_train_dir = organized_dir / "classification" / "train"
-    classification_val_dir = organized_dir / "classification" / "val"
-    
-    if classification_train_dir.exists() and classification_val_dir.exists():
-        # Check if it has images
-        train_images_count = 0
-        val_images_count = 0
-        for class_dir in classification_train_dir.iterdir():
-            if class_dir.is_dir():
-                train_images_count += len(list(class_dir.glob('*.jpg')) + list(class_dir.glob('*.jpeg')) + list(class_dir.glob('*.png')))
-        for class_dir in classification_val_dir.iterdir():
-            if class_dir.is_dir():
-                val_images_count += len(list(class_dir.glob('*.jpg')) + list(class_dir.glob('*.jpeg')) + list(class_dir.glob('*.png')))
-        
-        if train_images_count > 0 or val_images_count > 0:
-            print(f"[OK] Found classification format dataset (from database export)", flush=True)
-            print(f"  Train images: {train_images_count}, Val images: {val_images_count}", flush=True)
-            logger.info(f"Using existing classification format dataset: {train_images_count} train, {val_images_count} val")
-            if pest_classes:
-                print(f"  Using classes from data.yaml: {pest_classes}", flush=True)
-                return classification_train_dir, classification_val_dir, pest_classes
-            else:
-                # Extract classes from directory structure
-                detected_classes = sorted([d.name for d in classification_train_dir.iterdir() if d.is_dir()])
-                if detected_classes:
-                    print(f"  Detected classes from directory: {detected_classes}", flush=True)
-                    logger.info(f"Detected classes from directory: {detected_classes}")
                     return classification_train_dir, classification_val_dir, detected_classes
     
     # Check if organized dataset exists (from smart import)

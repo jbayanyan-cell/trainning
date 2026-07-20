@@ -26,12 +26,30 @@ from urllib.parse import parse_qs, urlparse
 
 CLASS_NAME_MAP = {
     "black bug": "black_bug",
+    "black_bug": "black_bug",
     "brown hopper": "brown_hopper",
+    "brown_hopper": "brown_hopper",
+    "brown_planthopper": "brown_hopper",
+    "brown planthopper": "brown_hopper",
     "green hopper": "green_hopper",
+    "green_hopper": "green_hopper",
+    "green_leafhopper": "green_hopper",
+    "green leafhopper": "green_hopper",
     "ricebug": "rice_bug",
     "rice bug": "rice_bug",
+    "rice_bug": "rice_bug",
     "white stem borer": "white_stem_borer",
+    "white_stem_borer": "white_stem_borer",
 }
+
+
+def canonical_class_name(name: str) -> str:
+    """Map Roboflow / alias folder names to the 5 production class codes."""
+    raw = (name or "").strip()
+    mapped = CLASS_NAME_MAP.get(raw, CLASS_NAME_MAP.get(raw.lower()))
+    if mapped:
+        return mapped
+    return raw.lower().replace(" ", "_").replace("-", "_")
 
 # Default: Google Drive FILE link to Dataset20260715folder.zip (not a folder).
 DEFAULT_DATASET_ZIP_URL = (
@@ -121,11 +139,17 @@ def _copy_class_tree(src_split: Path, dst_split: Path, normalize_names: bool) ->
             continue
         name = class_dir.name
         if normalize_names:
-            name = CLASS_NAME_MAP.get(name, CLASS_NAME_MAP.get(name.lower(), name))
-            name = name.replace(" ", "_").replace("-", "_")
+            name = canonical_class_name(name)
         target = dst_split / name
         if target.exists():
-            shutil.rmtree(target)
+            # Merge into existing canonical folder (handles alias duplicates)
+            for img in class_dir.iterdir():
+                if img.is_file() and img.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                    dest = target / img.name
+                    if not dest.exists():
+                        shutil.copy2(img, dest)
+                        count += 1
+            continue
         shutil.copytree(class_dir, target)
         count += sum(1 for _ in target.rglob("*") if _.suffix.lower() in {".jpg", ".jpeg", ".png"})
     return count
