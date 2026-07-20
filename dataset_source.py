@@ -24,9 +24,9 @@ from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 
-# Default starter dataset (Google Drive folder). Override with Railway Variable DATASET_ZIP_URL.
+# Default: Google Drive FILE link to Dataset20260715folder.zip (not a folder).
 DEFAULT_DATASET_ZIP_URL = (
-    "https://drive.google.com/drive/folders/1H_TDkyyCZus54yH92vgFVwsjsSPK5Z1Y?usp=sharing"
+    "https://drive.google.com/file/d/1xJHs0Jsy6pXJOsv_RApupq8X49JeiPM9/view?usp=sharing"
 )
 
 
@@ -199,32 +199,44 @@ def extract_drive_folder_id(url: str) -> Optional[str]:
 
 
 def download_google_drive_folder(url: str, dest_dir: Path) -> Path:
-    """Download a shared Drive folder using gdown. Returns the folder path with train/."""
+    """
+    Drive folders with >50 files fail under gdown.
+    Raise a clear error so operators upload a ZIP file instead.
+    """
+    folder_id = extract_drive_folder_id(url)
+    raise RuntimeError(
+        "Google Drive FOLDER links cannot be used (gdown limit: 50 files; "
+        f"your dataset has hundreds). Folder id={folder_id}. "
+        "Upload exports/Dataset20260715folder.zip as a single FILE on Drive, "
+        "share it (Anyone with the link), and set DATASET_ZIP_URL to that FILE link "
+        "(looks like https://drive.google.com/file/d/FILE_ID/view)."
+    )
+
+
+def download_google_drive_file(url: str, dest: Path) -> None:
+    """Download a single Drive file (ZIP) via gdown — works past the confirm page."""
     import gdown
 
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    folder_id = extract_drive_folder_id(url)
-    if not folder_id:
-        raise ValueError(f"Not a Google Drive folder URL: {url}")
+    m = re.search(r"drive\.google\.com/file/d/([^/]+)", url)
+    file_id = None
+    if m:
+        file_id = m.group(1)
+    else:
+        parsed = urlparse(url)
+        if "drive.google.com" in parsed.netloc:
+            qs = parse_qs(parsed.query)
+            if "id" in qs and qs["id"]:
+                file_id = qs["id"][0]
 
-    # gdown creates dest_dir/<folder_name>/...
-    print(f"[INFO] Downloading Google Drive folder id={folder_id} via gdown...", flush=True)
-    gdown.download_folder(
-        id=folder_id,
-        output=str(dest_dir),
-        quiet=False,
-        use_cookies=False,
-    )
+    if file_id:
+        print(f"[INFO] Downloading Google Drive file id={file_id} via gdown...", flush=True)
+        out = gdown.download(id=file_id, output=str(dest), quiet=False)
+        if not out or not Path(out).exists():
+            raise RuntimeError("gdown failed to download Drive file")
+        return
 
-    # Find a directory that contains train/
-    for child in sorted(dest_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-        if child.is_dir() and (child / "train").is_dir():
-            return child
-    if (dest_dir / "train").is_dir():
-        return dest_dir
-    raise FileNotFoundError(
-        f"Drive folder downloaded but no train/ found under {dest_dir}"
-    )
+    # Non-Drive URL
+    _download_url_to_file(url, dest)
 
 
 def download_external_dataset_zip(script_dir: Path, logger=None) -> bool:
@@ -246,8 +258,7 @@ def download_external_dataset_zip(script_dir: Path, logger=None) -> bool:
     )
     if not env_set:
         print(
-            "[INFO] Using built-in default Drive folder URL "
-            "(set Railway Variable DATASET_ZIP_URL to override)",
+            "[INFO] No DATASET_ZIP_URL env var — using get_dataset_zip_url() default if any",
             flush=True,
         )
     if dataset_ready(script_dir):
@@ -265,33 +276,22 @@ def download_external_dataset_zip(script_dir: Path, logger=None) -> bool:
             pass
 
     try:
-        # --- Google Drive folder ---
+        # --- Google Drive folder (not supported for large datasets) ---
         if is_google_drive_folder(url):
-            print(f"[INFO] DATASET_ZIP_URL is a Google Drive folder", flush=True)
-            print(f"  {url[:100]}", flush=True)
-            downloaded = download_google_drive_folder(url, training_data / "_drive_download")
-            target = training_data / "Dataset20260715folder"
-            if target.exists():
-                shutil.rmtree(target)
-            shutil.move(str(downloaded), str(target))
-            drive_root = training_data / "_drive_download"
-            if drive_root.exists():
-                shutil.rmtree(drive_root, ignore_errors=True)
-            ok = normalize_dataset_layout(script_dir)
-            if not ok:
-                raise RuntimeError("Could not normalize Drive folder into dataset_organized")
-            print("[OK] External Drive folder dataset ready", flush=True)
-            return True
+            download_google_drive_folder(url, training_data / "_drive_download")
 
-        # --- ZIP file URL ---
+        # --- ZIP file URL (preferred) ---
         print(f"[INFO] Downloading external dataset ZIP...", flush=True)
-        print(f"  URL: {resolve_dataset_zip_url(url)[:120]}...", flush=True)
+        print(f"  URL: {url[:120]}...", flush=True)
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
             tmp_path = Path(tmp.name)
 
         try:
-            _download_url_to_file(url, tmp_path)
+            if "drive.google.com" in url:
+                download_google_drive_file(url, tmp_path)
+            else:
+                _download_url_to_file(url, tmp_path)
             size_mb = tmp_path.stat().st_size / (1024 * 1024)
             print(f"[OK] ZIP downloaded ({size_mb:.1f} MB)", flush=True)
             if tmp_path.stat().st_size < 1024:
@@ -301,8 +301,9 @@ def download_external_dataset_zip(script_dir: Path, logger=None) -> bool:
                 magic = f.read(4)
             if magic[:2] != b"PK":
                 raise RuntimeError(
-                    "Downloaded file is not a ZIP (bad Drive link?). "
-                    "Use a file share link or a Drive folder URL."
+                    "Downloaded file is not a ZIP. "
+                    "Use a Google Drive FILE link to Dataset20260715folder.zip "
+                    "(not a folder link)."
                 )
 
             with zipfile.ZipFile(tmp_path, "r") as zf:
