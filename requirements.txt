@@ -1,0 +1,14 @@
+# AgriShield Training Service (Railway)
+# CPU PyTorch — keep image lean; use Hobby+ memory for real training
+
+Flask==2.3.3
+gunicorn==21.2.0
+requests==2.31.0
+Pillow==10.1.0
+numpy==1.24.4
+PyYAML==6.0.1
+pymysql==1.1.0
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.1.2+cpu
+torchvision==0.16.2+cpu
