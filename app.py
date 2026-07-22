@@ -21,9 +21,11 @@ PHP_API_BASE = os.getenv(
     "https://agrishield.bccbsis.com/api/training",
 ).rstrip("/")
 TRAINING_SCRIPT = os.getenv("TRAINING_SCRIPT", "train.py")
-DEFAULT_EPOCHS = int(os.getenv("DEFAULT_EPOCHS", "10"))
-DEFAULT_BATCH_SIZE = int(os.getenv("DEFAULT_BATCH_SIZE", "8"))
+DEFAULT_EPOCHS = int(os.getenv("DEFAULT_EPOCHS", "3"))
+DEFAULT_BATCH_SIZE = int(os.getenv("DEFAULT_BATCH_SIZE", "16"))
 TRAINING_API_KEY = os.getenv("TRAINING_API_KEY", "")
+# Railway has no GPUs; CPU jobs need a long wall clock. Override with TRAINING_TIMEOUT_SEC.
+TRAINING_TIMEOUT_SEC = int(os.getenv("TRAINING_TIMEOUT_SEC", str(6 * 3600)))
 
 
 def _headers():
@@ -123,7 +125,11 @@ def run_training(job_id: int):
 
         epochs, batch_size = parse_epochs_batch(job)
         update_job_status(job_id, "running")
-        log_to_php(job_id, "INFO", f"Training started on Railway (epochs={epochs}, batch={batch_size})")
+        log_to_php(
+            job_id,
+            "INFO",
+            f"Training started on Railway CPU (epochs={epochs}, batch={batch_size}, timeout={TRAINING_TIMEOUT_SEC}s). Railway has no GPU.",
+        )
 
         script_dir = Path(__file__).resolve().parent
         script_path = script_dir / TRAINING_SCRIPT
@@ -136,6 +142,8 @@ def run_training(job_id: int):
         env = os.environ.copy()
         env["PHP_API_BASE"] = PHP_API_BASE
         env["PYTHONUNBUFFERED"] = "1"
+        env.setdefault("OMP_NUM_THREADS", "4")
+        env.setdefault("MKL_NUM_THREADS", "4")
 
         cmd = [
             "python",
@@ -150,12 +158,11 @@ def run_training(job_id: int):
         print(f"[INFO] Running: {' '.join(cmd)}", flush=True)
         log_to_php(job_id, "INFO", f"Running train.py epochs={epochs} batch={batch_size}")
 
-        # Up to 2 hours — Railway hobby plans may still kill long jobs
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=7200,
+            timeout=TRAINING_TIMEOUT_SEC,
             cwd=str(script_dir),
             env=env,
         )
@@ -168,7 +175,8 @@ def run_training(job_id: int):
             update_job_status(job_id, "failed", err)
             log_to_php(job_id, "ERROR", f"Training failed: {err}")
     except subprocess.TimeoutExpired:
-        msg = "Training timeout (exceeded 2 hours)"
+        hours = max(1, TRAINING_TIMEOUT_SEC // 3600)
+        msg = f"Training timeout (exceeded {hours} hours on Railway CPU)"
         update_job_status(job_id, "failed", msg)
         log_to_php(job_id, "ERROR", msg)
     except Exception as exc:
@@ -230,7 +238,12 @@ def health():
             "dataset_env_flags": env_raw,
             "dataset_using_builtin_default": bool(ds_url) and not any(env_raw.values()),
             "dataset_zip_url_preview": (ds_url[:70] + "...") if ds_url else None,
-            "code_version": "dataset-zip-v8",
+            "code_version": "cpu-fast-v9",
+            "cuda_available": False,
+            "gpu_note": "Railway does not offer GPU instances; training runs on CPU.",
+            "training_timeout_sec": TRAINING_TIMEOUT_SEC,
+            "default_epochs": DEFAULT_EPOCHS,
+            "default_batch_size": DEFAULT_BATCH_SIZE,
         }
         return jsonify(payload), (200 if php_ok else 503)
     except Exception as exc:

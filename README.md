@@ -1,4 +1,10 @@
-# AgriShield Training on Railway
+# AgriShield Training on Railway (CPU only)
+
+> **Important:** Railway does **not** offer GPU instances
+> ([docs](https://docs.railway.com/guides/ai-agent-workers)).
+> This service trains on **CPU**. Use **2–3 epochs** and batch **16** so jobs finish.
+> For real GPU training, use Google Colab, RunPod, Modal, or a local NVIDIA PC,
+> then upload the ONNX via admin **Deploy**.
 
 Deploy this folder as a Railway service so admin **Start Training** works without Heroku.
 
@@ -28,8 +34,9 @@ In Railway → Variables:
 | Variable | Value |
 |----------|--------|
 | `PHP_API_BASE` | `https://agrishield.bccbsis.com/api/training` |
-| `DEFAULT_EPOCHS` | `10` |
-| `DEFAULT_BATCH_SIZE` | `8` |
+| `DEFAULT_EPOCHS` | `3` |
+| `DEFAULT_BATCH_SIZE` | `16` |
+| `TRAINING_TIMEOUT_SEC` | `21600` (6 hours; optional) |
 
 Optional: `TRAINING_API_KEY` if you enable API key checks on PHP endpoints.
 
@@ -53,31 +60,23 @@ Detection stays on **Vercel**. Training uses **Railway** only.
 curl https://YOUR-APP.up.railway.app/health
 ```
 
-Expect `"status":"ok"` and `"php_api":"connected"`.
+Expect `"status":"ok"`, `"php_api":"connected"`, and `"cuda_available":false`.
 
-Then in admin → Training → **Start Training**.
+Then in admin → Training → **Start Training** with **3 epochs**.
 
 ## Option 2: External dataset ZIP (no Hostinger image folder)
 
-1. Zip `Dataset20260715folder` on your PC **or** share the folder on Google Drive.
-2. In Railway → Variables set either:
+1. Zip `Dataset20260715folder` on your PC **or** share a ZIP file on Google Drive.
+2. In Railway → Variables set:
 
 ```
-# Folder (what you have now):
-DATASET_ZIP_URL=https://drive.google.com/drive/folders/1H_TDkyyCZus54yH92vgFVwsjsSPK5Z1Y?usp=sharing
-
-# OR a single ZIP file share link:
-# DATASET_ZIP_URL=https://drive.google.com/file/d/YOUR_FILE_ID/view?usp=sharing
+DATASET_ZIP_URL=https://drive.google.com/file/d/YOUR_FILE_ID/view?usp=sharing
 ```
 
-(Drive folder links are downloaded with `gdown`. Sharing must be **Anyone with the link**.)
+Sharing must be **Anyone with the link**. Prefer a **FILE** link (folder links fail past 50 files).
 
-4. Redeploy Railway after pushing `dataset_source.py`.
-5. On the PHP site, keep `$USE_EXTERNAL_DATASET_ZIP = true` in `training_service_config.php`.
-6. Admin → **Start Training** — Railway downloads the ZIP, trains, uploads ONNX back via PHP.
-
-Later improvements: replace the ZIP with a newer one (captures added), update the Drive file / URL, train again.
-
+3. On the PHP site, keep `$USE_EXTERNAL_DATASET_ZIP = true` in `training_service_config.php`.
+4. Admin → **Start Training** — Railway downloads the ZIP, trains, uploads ONNX back via PHP.
 
 ## Flow
 
@@ -85,7 +84,7 @@ Later improvements: replace the ZIP with a newer one (captures added), update th
 Admin Start Training
   → PHP creates job + POST Railway /train
   → Railway downloads DATASET_ZIP_URL (or PHP dataset ZIP)
-  → Trains (CPU PyTorch)
+  → Trains (CPU PyTorch — no GPU on Railway)
   → Uploads ONNX via upload_model.php
   → Admin Deploy → Vercel serves new model
 ```

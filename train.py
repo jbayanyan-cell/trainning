@@ -380,6 +380,15 @@ class ModelTrainer:
         self.config = config
         self.logger = logger
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # Railway is CPU-only (no GPU instances). Use all available cores.
+        if self.device.type == 'cpu':
+            threads = max(1, min(8, (os.cpu_count() or 2)))
+            torch.set_num_threads(threads)
+            torch.set_num_interop_threads(max(1, threads // 2))
+        self.logger.info(
+            f"Compute device: {self.device}"
+            + (f" ({torch.cuda.get_device_name(0)})" if self.device.type == 'cuda' else " [Railway has no GPU — CPU training]")
+        )
         self.best_accuracy = 0.0
         self.training_history = {
             'train_loss': [],
@@ -404,13 +413,11 @@ class ModelTrainer:
     def get_data_transforms(self):
         """Get data transforms for training and validation"""
         
-        # Training transforms with augmentation
+        # Training transforms — keep light on CPU (Railway has no GPU)
         train_transforms = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(degrees=15),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
@@ -462,9 +469,8 @@ class ModelTrainer:
             progress_line = f"  {batch_idx+1}/{len(dataloader)}  {loss.item():.4f}  {current_acc:.1f}%  [{bar}] {batch_progress:.0f}%"
             print(progress_line, end='\r', flush=True)
             
-            # Log every batch to ensure visibility in logs (not just every 10)
-            # This ensures progress is visible even if \r doesn't work in log streams
-            if batch_idx % 5 == 0 or batch_idx == len(dataloader) - 1:
+            # Log progress less often to PHP (HTTP logging was slowing CPU runs)
+            if batch_idx % 20 == 0 or batch_idx == len(dataloader) - 1:
                 print(f"Batch {batch_idx+1}/{len(dataloader)}, Loss: {loss.item():.4f}, Acc: {current_acc:.2f}%", flush=True)
                 self.logger.info(f'Batch {batch_idx+1}/{len(dataloader)}, Loss: {loss.item():.4f}, Acc: {current_acc:.2f}%')
                 sys.stdout.flush()
@@ -519,8 +525,20 @@ class ModelTrainer:
         self.logger.info("Starting training process")
         
         # Create data loaders
-        train_loader = DataLoader(train_dataset, batch_size=self.config['batch_size'], shuffle=True, num_workers=0)
-        val_loader = DataLoader(val_dataset, batch_size=self.config['batch_size'], shuffle=False, num_workers=0)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=self.config['batch_size'],
+            shuffle=True,
+            num_workers=0,
+            pin_memory=(self.device.type == 'cuda'),
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=self.config['batch_size'],
+            shuffle=False,
+            num_workers=0,
+            pin_memory=(self.device.type == 'cuda'),
+        )
         
         # Create model
         num_classes = len(train_dataset.classes)
@@ -2163,9 +2181,9 @@ def main():
     parser = argparse.ArgumentParser(description='Admin Training Script - YOLO Object Detection')
     parser.add_argument('--job_id', type=int, required=True, help='Training job ID')
     # Get default epochs from environment variable
-    default_epochs = int(os.getenv('DEFAULT_EPOCHS', '10'))
+    default_epochs = int(os.getenv('DEFAULT_EPOCHS', '3'))
     parser.add_argument('--epochs', type=int, default=default_epochs, help=f'Number of epochs (default: {default_epochs})')
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=int(os.getenv('DEFAULT_BATCH_SIZE', '16')), help='Batch size')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='Learning rate (not used for YOLO)')
     
     args = parser.parse_args()
