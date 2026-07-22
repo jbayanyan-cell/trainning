@@ -380,14 +380,17 @@ class ModelTrainer:
         self.config = config
         self.logger = logger
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # Railway is CPU-only (no GPU instances). Use all available cores.
+        # Railway is CPU-only. Prefer intra-op threads; avoid set_num_interop_threads
+        # (raises if any parallel work already started).
         if self.device.type == 'cpu':
-            threads = max(1, min(8, (os.cpu_count() or 2)))
-            torch.set_num_threads(threads)
-            torch.set_num_interop_threads(max(1, threads // 2))
+            try:
+                threads = max(1, min(4, (os.cpu_count() or 2)))
+                torch.set_num_threads(threads)
+            except Exception:
+                pass
         self.logger.info(
             f"Compute device: {self.device}"
-            + (f" ({torch.cuda.get_device_name(0)})" if self.device.type == 'cuda' else " [Railway has no GPU — CPU training]")
+            + (f" ({torch.cuda.get_device_name(0)})" if self.device.type == 'cuda' else " [Railway has no GPU - CPU training]")
         )
         self.best_accuracy = 0.0
         self.training_history = {
@@ -2183,7 +2186,7 @@ def main():
     # Get default epochs from environment variable
     default_epochs = int(os.getenv('DEFAULT_EPOCHS', '3'))
     parser.add_argument('--epochs', type=int, default=default_epochs, help=f'Number of epochs (default: {default_epochs})')
-    parser.add_argument('--batch_size', type=int, default=int(os.getenv('DEFAULT_BATCH_SIZE', '16')), help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=int(os.getenv('DEFAULT_BATCH_SIZE', '8')), help='Batch size')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='Learning rate (not used for YOLO)')
     
     args = parser.parse_args()

@@ -22,10 +22,13 @@ PHP_API_BASE = os.getenv(
 ).rstrip("/")
 TRAINING_SCRIPT = os.getenv("TRAINING_SCRIPT", "train.py")
 DEFAULT_EPOCHS = int(os.getenv("DEFAULT_EPOCHS", "3"))
-DEFAULT_BATCH_SIZE = int(os.getenv("DEFAULT_BATCH_SIZE", "16"))
+DEFAULT_BATCH_SIZE = int(os.getenv("DEFAULT_BATCH_SIZE", "8"))
 TRAINING_API_KEY = os.getenv("TRAINING_API_KEY", "")
 # Railway has no GPUs; CPU jobs need a long wall clock. Override with TRAINING_TIMEOUT_SEC.
 TRAINING_TIMEOUT_SEC = int(os.getenv("TRAINING_TIMEOUT_SEC", str(6 * 3600)))
+# Soft caps so admin typos (e.g. epochs=16) don't OOM / never finish on CPU.
+MAX_EPOCHS_CPU = int(os.getenv("MAX_EPOCHS_CPU", "5"))
+MAX_BATCH_CPU = int(os.getenv("MAX_BATCH_CPU", "8"))
 
 
 def _headers():
@@ -116,6 +119,33 @@ def parse_epochs_batch(job: dict) -> tuple[int, int]:
     return epochs, batch_size
 
 
+def _tail_useful_error(text: str, limit: int = 800) -> str:
+    """Prefer the real traceback; ignore gdown progress noise at the start of stderr."""
+    if not text:
+        return "unknown error (no output; process may have been OOM-killed)"
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+    useful = [
+        ln
+        for ln in lines
+        if not ln.startswith("Downloading")
+        and not ln.startswith("From:")
+        and not ln.startswith("To:")
+        and "MB/s" not in ln
+        and "█" not in ln
+        and "▉" not in ln
+    ]
+    joined = "\n".join(useful if useful else lines)
+    if "Traceback" in joined:
+        idx = joined.rfind("Traceback")
+        joined = joined[idx:]
+    else:
+        joined = "\n".join(joined.splitlines()[-40:])
+    joined = joined.strip() or (
+        "Process exited non-zero (often OOM on Railway). Try batch_size=4-8 and epochs=3."
+    )
+    return joined[:limit]
+
+
 def run_training(job_id: int):
     try:
         job = get_training_job(job_id)
@@ -124,6 +154,22 @@ def run_training(job_id: int):
             return
 
         epochs, batch_size = parse_epochs_batch(job)
+
+        if epochs > MAX_EPOCHS_CPU:
+            log_to_php(
+                job_id,
+                "WARNING",
+                f"epochs={epochs} capped to {MAX_EPOCHS_CPU} for Railway CPU (set MAX_EPOCHS_CPU to override)",
+            )
+            epochs = MAX_EPOCHS_CPU
+        if batch_size > MAX_BATCH_CPU:
+            log_to_php(
+                job_id,
+                "WARNING",
+                f"batch_size={batch_size} capped to {MAX_BATCH_CPU} for Railway CPU memory",
+            )
+            batch_size = MAX_BATCH_CPU
+
         update_job_status(job_id, "running")
         log_to_php(
             job_id,
@@ -142,8 +188,9 @@ def run_training(job_id: int):
         env = os.environ.copy()
         env["PHP_API_BASE"] = PHP_API_BASE
         env["PYTHONUNBUFFERED"] = "1"
-        env.setdefault("OMP_NUM_THREADS", "4")
-        env.setdefault("MKL_NUM_THREADS", "4")
+        env.setdefault("OMP_NUM_THREADS", "2")
+        env.setdefault("MKL_NUM_THREADS", "2")
+        env.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
         cmd = [
             "python",
@@ -158,22 +205,36 @@ def run_training(job_id: int):
         print(f"[INFO] Running: {' '.join(cmd)}", flush=True)
         log_to_php(job_id, "INFO", f"Running train.py epochs={epochs} batch={batch_size}")
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=TRAINING_TIMEOUT_SEC,
-            cwd=str(script_dir),
-            env=env,
-        )
+        log_path = script_dir / f"training_job_{job_id}.log"
+        with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
+            result = subprocess.run(
+                cmd,
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=TRAINING_TIMEOUT_SEC,
+                cwd=str(script_dir),
+                env=env,
+            )
+
+        log_text = ""
+        try:
+            log_text = log_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
         if result.returncode == 0:
             update_job_status(job_id, "completed")
             log_to_php(job_id, "INFO", "Training completed successfully")
         else:
-            err = (result.stderr or result.stdout or "unknown error")[:500]
+            err = _tail_useful_error(log_text)
+            if result.returncode < 0:
+                err = (
+                    f"Process killed (signal {-result.returncode}). "
+                    f"Likely out of memory. Use batch_size=4 and epochs=3. Detail: {err}"
+                )
             update_job_status(job_id, "failed", err)
-            log_to_php(job_id, "ERROR", f"Training failed: {err}")
+            log_to_php(job_id, "ERROR", f"Training failed (exit={result.returncode}): {err}")
     except subprocess.TimeoutExpired:
         hours = max(1, TRAINING_TIMEOUT_SEC // 3600)
         msg = f"Training timeout (exceeded {hours} hours on Railway CPU)"
@@ -215,10 +276,9 @@ def health():
     if request.method == "OPTIONS":
         return "", 204
     try:
-        # job_id=0 returns 400 from get_job.php when PHP is reachable
         r = php_get("get_job.php", {"job_id": 0}, timeout=12)
         php_ok = r.status_code in (200, 400, 404)
-        from dataset_source import get_dataset_zip_url, DEFAULT_DATASET_ZIP_URL
+        from dataset_source import get_dataset_zip_url
 
         ds_url = get_dataset_zip_url()
         env_raw = {
@@ -238,12 +298,14 @@ def health():
             "dataset_env_flags": env_raw,
             "dataset_using_builtin_default": bool(ds_url) and not any(env_raw.values()),
             "dataset_zip_url_preview": (ds_url[:70] + "...") if ds_url else None,
-            "code_version": "cpu-fast-v9",
+            "code_version": "cpu-safe-v10",
             "cuda_available": False,
             "gpu_note": "Railway does not offer GPU instances; training runs on CPU.",
             "training_timeout_sec": TRAINING_TIMEOUT_SEC,
             "default_epochs": DEFAULT_EPOCHS,
             "default_batch_size": DEFAULT_BATCH_SIZE,
+            "max_epochs_cpu": MAX_EPOCHS_CPU,
+            "max_batch_cpu": MAX_BATCH_CPU,
         }
         return jsonify(payload), (200 if php_ok else 503)
     except Exception as exc:
@@ -277,7 +339,6 @@ def start_training():
             return jsonify({"success": False, "message": "Job not found"}), 404
 
         status = (job.get("status") or "").lower()
-        # Allow pending; also accept running if PHP already flipped it
         if status not in ("pending", "running"):
             return (
                 jsonify(

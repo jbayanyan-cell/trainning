@@ -301,7 +301,7 @@ def download_google_drive_file(url: str, dest: Path) -> None:
 
     if file_id:
         print(f"[INFO] Downloading Google Drive file id={file_id} via gdown...", flush=True)
-        out = gdown.download(id=file_id, output=str(dest), quiet=False)
+        out = gdown.download(id=file_id, output=str(dest), quiet=True)
         if not out or not Path(out).exists():
             raise RuntimeError("gdown failed to download Drive file")
         return
