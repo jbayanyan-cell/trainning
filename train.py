@@ -110,51 +110,47 @@ def load_config_from_php():
 php_config = load_config_from_php()
 
 # Database configuration
-# Priority: Environment variables > local defaults > config.php
-# Use local database by default for training (online DB may not be accessible)
-DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'localhost'),
-    'user': os.getenv('DB_USER', 'root'),  # Default to local root user
-    'password': os.getenv('DB_PASSWORD', ''),  # Default to empty (local XAMPP)
-    'database': os.getenv('DB_NAME', 'asdb'),  # Default to local database
-    'charset': os.getenv('DB_CHARSET', 'utf8mb4')
-}
+# On Railway/cloud: never open direct MySQL — use PHP API only.
+_use_php_api = (
+    bool(os.getenv("RAILWAY_ENVIRONMENT"))
+    or bool(os.getenv("RAILWAY_STATIC_URL"))
+    or bool(os.getenv("DYNO"))
+    or os.getenv("FORCE_PHP_API", "").lower() in ("1", "true", "yes")
+    or bool(os.getenv("PHP_API_BASE"))
+)
 
-# Database config - only needed if pymysql is available and we're running locally
-# On Heroku, we use PHP API gateway instead
-if PYMYSQL_AVAILABLE and not os.getenv('DB_HOST') and not os.getenv('DB_USER'):
-    # Check if we can connect to local database first (local development only)
+if _use_php_api or not PYMYSQL_AVAILABLE:
+    DB_CONFIG = None
+    print("[INFO] Using PHP API gateway for database access (no direct MySQL)", flush=True)
+elif PYMYSQL_AVAILABLE and not os.getenv("DB_HOST") and not os.getenv("DB_USER"):
     try:
         test_conn = pymysql.connect(
-            host='localhost',
-            user='root',
-            password='',
-            database='asdb'
+            host="localhost",
+            user="root",
+            password="",
+            database="asdb",
         )
         test_conn.close()
         print("[OK] Using local database (localhost/root/asdb)", flush=True)
         DB_CONFIG = {
-            'host': 'localhost',
-            'user': 'root',
-            'password': '',
-            'database': 'asdb',
-            'charset': 'utf8mb4'
+            "host": "localhost",
+            "user": "root",
+            "password": "",
+            "database": "asdb",
+            "charset": "utf8mb4",
         }
     except Exception:
-        # If local fails, try config.php credentials
-        print("[WARNING] Local database not accessible, trying config.php credentials...", flush=True)
-        DB_CONFIG = {
-            'host': php_config.get('db_host', 'localhost'),
-            'user': php_config.get('db_user', 'root'),
-            'password': php_config.get('db_password', ''),
-            'database': php_config.get('db_name', 'asdb'),
-            'charset': 'utf8mb4'
-        }
-        print(f"[INFO] Using database from config.php: {DB_CONFIG['host']} / {DB_CONFIG['database']}", flush=True)
+        print("[INFO] Local MySQL unavailable — using PHP API gateway", flush=True)
+        DB_CONFIG = None
 else:
-    # On Heroku or when pymysql is not available, use PHP API gateway
-    DB_CONFIG = None
-    print("[INFO] Using PHP API gateway for database access (no direct MySQL connection)", flush=True)
+    DB_CONFIG = {
+        "host": os.getenv("DB_HOST", "localhost"),
+        "user": os.getenv("DB_USER", "root"),
+        "password": os.getenv("DB_PASSWORD", ""),
+        "database": os.getenv("DB_NAME", "asdb"),
+        "charset": os.getenv("DB_CHARSET", "utf8mb4"),
+    }
+    print(f"[INFO] Using DB_CONFIG from env: {DB_CONFIG['host']} / {DB_CONFIG['database']}", flush=True)
 
 class AdminTrainingLogger:
     """Custom logger that writes to database"""
@@ -618,50 +614,52 @@ class ModelTrainer:
         """Convert PyTorch model to ONNX format"""
         try:
             onnx_path = model_path.with_suffix('.onnx')
-            
-            self.logger.info(f"Converting model to ONNX format...")
-            print(f"[INFO] Converting model to ONNX...", flush=True)
-            
-            # Set model to evaluation mode
-            model.eval()
-            
-            # Create dummy input
-            dummy_input = torch.randn(1, *input_size)
-            
-            # Export to ONNX (torch.onnx.export is built into PyTorch)
+
+            self.logger.info("Converting model to ONNX format...")
+            print("[INFO] Converting model to ONNX...", flush=True)
+
+            # Export on CPU (Railway has no GPU; avoids device mismatch)
+            export_model = model.cpu().eval()
+            dummy_input = torch.randn(1, *input_size, device="cpu")
+
             torch.onnx.export(
-                model,
+                export_model,
                 dummy_input,
                 str(onnx_path),
                 export_params=True,
                 opset_version=11,
                 do_constant_folding=True,
-                input_names=['input'],
-                output_names=['output'],
-                dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
+                input_names=["input"],
+                output_names=["output"],
+                dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
             )
-            
-            # Validate ONNX model (optional)
+
+            # Move model back if training continues on another device
+            model.to(self.device)
+
             try:
                 import onnx
-                onnx_model = onnx.load(str(onnx_path))
-                onnx.checker.check_model(onnx_model)
-                self.logger.info(f"[OK] ONNX model validated successfully")
+
+                onnx.checker.check_model(onnx.load(str(onnx_path)))
+                self.logger.info("[OK] ONNX model validated successfully")
             except ImportError:
-                # onnx package not available, skip validation
-                pass
+                self.logger.warning("onnx package missing — skipped validation (export still OK)")
             except Exception as e:
                 self.logger.warning(f"ONNX validation warning: {e}")
-            
+
             onnx_size_mb = onnx_path.stat().st_size / (1024 * 1024)
             self.logger.info(f"[OK] ONNX model saved to: {onnx_path} ({onnx_size_mb:.2f} MB)")
             print(f"[OK] ONNX model saved: {onnx_path.name} ({onnx_size_mb:.2f} MB)", flush=True)
-            
+
             return onnx_path
-            
+
         except Exception as e:
             self.logger.error(f"Failed to convert to ONNX: {e}")
             print(f"[ERROR] ONNX conversion failed: {e}", flush=True)
+            try:
+                model.to(self.device)
+            except Exception:
+                pass
             return None
     
     def upload_model_to_server(self, model_path, accuracy, model_type='onnx'):
@@ -2348,8 +2346,15 @@ def main():
                         logger.warning(f"Could not copy model to standard location: {e}")
                         print(f"[WARN] Could not copy model to standard location: {e}", flush=True)
                 else:
-                    logger.error("Failed to convert model to ONNX")
-                    print(f"[ERROR] Failed to convert model to ONNX", flush=True)
+                    logger.error("Failed to convert model to ONNX — attempting .pth upload fallback")
+                    print("[ERROR] Failed to convert model to ONNX; uploading .pth fallback", flush=True)
+                    upload_success = trainer.upload_model_to_server(
+                        pth_path, trainer.best_accuracy, "pth"
+                    )
+                    if upload_success:
+                        logger.info("Uploaded .pth fallback successfully (convert to ONNX offline if needed)")
+                    else:
+                        logger.error("Both ONNX convert and .pth upload failed")
             else:
                 logger.error("No model file found after training!")
                 print(f"[ERROR] No model file found after training!", flush=True)

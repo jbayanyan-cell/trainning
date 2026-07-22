@@ -298,7 +298,7 @@ def health():
             "dataset_env_flags": env_raw,
             "dataset_using_builtin_default": bool(ds_url) and not any(env_raw.values()),
             "dataset_zip_url_preview": (ds_url[:70] + "...") if ds_url else None,
-            "code_version": "cpu-safe-v10",
+            "code_version": "onnx-fix-v11",
             "cuda_available": False,
             "gpu_note": "Railway does not offer GPU instances; training runs on CPU.",
             "training_timeout_sec": TRAINING_TIMEOUT_SEC,
