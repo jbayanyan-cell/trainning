@@ -699,10 +699,10 @@ class ModelTrainer:
             self.logger.error(f"Failed to read model file: {e}")
             return False
         
-        # Get farm_id from training job (if available)
+        # Get farm_id from training job (if available).
+        # Auto-activate as global current: do not send farm_id so PHP treats upload as overall active model.
         farm_id = 0
         try:
-            # Try to get farm_id from training_jobs table via PHP API
             php_api_base = os.getenv('PHP_API_BASE', 'https://agrishield.bccbsis.com/api/training')
             job_info_url = f"{php_api_base}/get_training_job_info.php"
             job_response = requests.get(f"{job_info_url}?job_id={self.job_id}", timeout=5)
@@ -711,10 +711,11 @@ class ModelTrainer:
                 if job_info.get('success') and job_info.get('farm_parcels_id'):
                     farm_id = int(job_info.get('farm_parcels_id', 0))
                     if farm_id > 0:
-                        self.logger.info(f"Found farm_id from training job: {farm_id}")
-                        print(f"[INFO] Training for farm_id: {farm_id}", flush=True)
-        except Exception as e:
-            # Silently fail - farm_id will be retrieved by upload_model.php from database
+                        self.logger.info(
+                            f"Job has farm_id={farm_id}; upload will still auto-activate as global current"
+                        )
+                        print(f"[INFO] Training job farm_id={farm_id} (activating as global current)", flush=True)
+        except Exception:
             pass
         
         # Prepare upload data - use files parameter for multipart upload
@@ -723,12 +724,10 @@ class ModelTrainer:
             'job_id': str(self.job_id),
             'accuracy': str(accuracy),
             'model_type': model_type,
-            'model_size_mb': str(model_size_mb)
+            'model_size_mb': str(model_size_mb),
+            # Force global activation path on PHP (farm assign ignored for now)
+            'farm_id': '0',
         }
-        
-        # Add farm_id if available
-        if farm_id > 0:
-            upload_data['farm_id'] = str(farm_id)
         
         # Prepare file for multipart upload
         files = {
@@ -774,64 +773,60 @@ class ModelTrainer:
                 self.logger.info(f"Response status: {response.status_code}")
                 self.logger.info(f"Response headers: {dict(response.headers)}")
                 
+                # Accept JSON success even when Hostinger returns HTTP 500 with a success body
+                try:
+                    result = response.json()
+                except ValueError:
+                    result = None
+
+                if result and result.get("success"):
+                    model_info = result.get("model", {}) or {}
+                    activated = bool(result.get("activated") or model_info.get("activated") or result.get("is_current") or model_info.get("is_current"))
+                    version = model_info.get("version", "N/A")
+                    path = model_info.get("path") or model_info.get("model_path") or "N/A"
+                    self.logger.info(
+                        f"[OK] Model uploaded successfully (HTTP {response.status_code}): {version}"
+                    )
+                    self.logger.info(f"  Path: {path}")
+                    self.logger.info(f"  Size: {model_info.get('size_mb', 0)} MB")
+                    self.logger.info(f"  Accuracy: {accuracy:.2f}%")
+                    if activated:
+                        self.logger.info(
+                            f"Model activated as current (global): version={version}, path={path}"
+                        )
+                        print(
+                            f"[OK] Model activated as current (global): {version} -> {path}",
+                            flush=True,
+                        )
+                    else:
+                        self.logger.warning(
+                            "Upload succeeded but server did not confirm activated/is_current"
+                        )
+                    if result.get("message"):
+                        self.logger.info(f"  Server: {result.get('message')[:300]}")
+                    print(
+                        f"[OK] Model uploaded and activated: {version}",
+                        flush=True,
+                    )
+                    return True
+
                 if response.status_code == 200:
-                    try:
-                        result = response.json()
-                        if result.get('success'):
-                            model_info = result.get('model', {})
-                            self.logger.info(f"[OK] Model uploaded successfully: {model_info.get('version', 'N/A')}")
-                            self.logger.info(f"  Path: {model_info.get('path', 'N/A')}")
-                            self.logger.info(f"  Size: {model_info.get('size_mb', 0):.2f} MB")
-                            self.logger.info(f"  Accuracy: {accuracy:.2f}%")
-                            print(f"[OK] Model uploaded and activated: {model_info.get('version', 'N/A')}", flush=True)
-                            return True
-                        else:
-                            error_msg = result.get('error', 'Unknown error')
-                            error_details = result.get('mysql_error') or result.get('php_error') or result.get('error')
-                            self.logger.error(f"Upload failed: {error_msg}")
-                            if error_details and error_details != error_msg:
-                                self.logger.error(f"Error details: {error_details}")
-                            print(f"[ERROR] Upload failed: {error_msg}", flush=True)
-                            if attempt < max_attempts:
-                                wait_time = 2 ** attempt
-                                print(f"[WARN] Retrying in {wait_time} seconds...", flush=True)
-                                time.sleep(wait_time)
-                                continue
-                            return False
-                    except ValueError as e:
-                        # Not JSON response
-                        error_text = response.text[:1000] if response.text else "No response body"
-                        self.logger.error(f"Invalid JSON response: {error_text}")
-                        print(f"[ERROR] Server returned invalid JSON: {error_text[:200]}", flush=True)
-                        if attempt < max_attempts:
-                            wait_time = 2 ** attempt
-                            time.sleep(wait_time)
-                            continue
-                        return False
-                else:
-                    # HTTP error - try to parse JSON error response
-                    error_text = response.text[:2000] if response.text else "No error message"
-                    self.logger.error(f"Upload failed: HTTP {response.status_code}")
-                    self.logger.error(f"Response body: {error_text}")
-                    
-                    # Try to parse as JSON to get detailed error
-                    try:
-                        error_json = response.json()
-                        error_msg = error_json.get('error', 'Unknown error')
-                        error_details = error_json.get('mysql_error') or error_json.get('php_error') or error_json.get('error')
-                        self.logger.error(f"Server error: {error_msg}")
-                        if error_details and error_details != error_msg:
-                            self.logger.error(f"Error details: {error_details}")
-                        print(f"[ERROR] HTTP {response.status_code}: {error_msg}", flush=True)
-                    except:
-                        print(f"[ERROR] HTTP {response.status_code}: {error_text[:200]}", flush=True)
-                    
+                    error_msg = (result or {}).get("error", "Unknown error") if result else "Invalid JSON"
+                    self.logger.error(f"Upload failed: {error_msg}")
+                    print(f"[ERROR] Upload failed: {error_msg}", flush=True)
                     if attempt < max_attempts:
-                        wait_time = 2 ** attempt
-                        print(f"[WARN] Retrying in {wait_time} seconds...", flush=True)
-                        time.sleep(wait_time)
+                        time.sleep(2 ** attempt)
                         continue
                     return False
+
+                error_text = response.text[:2000] if response.text else "No error message"
+                self.logger.error(f"Upload failed: HTTP {response.status_code}")
+                self.logger.error(f"Response body: {error_text}")
+                print(f"[ERROR] HTTP {response.status_code}", flush=True)
+                if attempt < max_attempts:
+                    time.sleep(2 ** attempt)
+                    continue
+                return False
                     
             except requests.exceptions.SSLError as e:
                 self.logger.warning(f"SSL error on attempt {attempt}: {e}")
@@ -2279,7 +2274,8 @@ def main():
         # Start training
         model = trainer.train(train_dataset, val_dataset)
         
-        # After training completes, upload the final best model once
+        # After training completes, upload the final best model once and auto-activate
+        upload_success = False
         if trainer.best_accuracy > 0:
             logger.info(f"Training completed! Final best accuracy: {trainer.best_accuracy:.2f}%")
             print(f"[OK] Training completed! Best accuracy: {trainer.best_accuracy:.2f}%", flush=True)
@@ -2289,80 +2285,48 @@ def main():
             onnx_path = model_dir / "best_model.onnx"
             pth_path = model_dir / "best_model.pth"
             
-            # Upload the final best model (only once at the end)
             if onnx_path.exists():
-                logger.info("Uploading final best model to server...")
+                logger.info("Uploading final best model to server (auto-activate as current)...")
                 print(f"[INFO] Uploading final best model (accuracy: {trainer.best_accuracy:.2f}%)...", flush=True)
                 upload_success = trainer.upload_model_to_server(onnx_path, trainer.best_accuracy, 'onnx')
                 
-                if upload_success:
-                    logger.info("Final model uploaded successfully!")
-                    print(f"[OK] Final model uploaded successfully!", flush=True)
-                else:
-                    # Log model location for manual upload
-                    logger.warning(f"Model upload failed, but model is saved locally at: {onnx_path}")
-                    logger.warning(f"Model size: {onnx_path.stat().st_size / (1024 * 1024):.2f} MB")
-                    logger.warning(f"To manually upload: Copy {onnx_path} to server and register in model_versions table")
-                    print(f"[WARN] Final model upload failed, but model is saved locally", flush=True)
-                    print(f"[INFO] Model location: {onnx_path}", flush=True)
-                    print(f"[INFO] Model size: {onnx_path.stat().st_size / (1024 * 1024):.2f} MB", flush=True)
-                    print(f"[INFO] You can manually upload this file to activate the model", flush=True)
-                    logger.warning("Final model upload failed, but model is saved locally")
-                    print(f"[WARN] Final model upload failed, but model is saved locally", flush=True)
-                
-                # Copy to standard location for detection API
                 standard_model_path = script_dir / "models" / "best.onnx"
                 try:
                     shutil.copy2(onnx_path, standard_model_path)
                     logger.info(f"Copied model to standard location: {standard_model_path}")
-                    print(f"[OK] Model copied to standard location: best.onnx", flush=True)
                 except Exception as e:
                     logger.warning(f"Could not copy model to standard location: {e}")
-                    print(f"[WARN] Could not copy model to standard location: {e}", flush=True)
             elif pth_path.exists():
-                # Only PyTorch model exists, convert to ONNX first, then upload
                 logger.info("Converting final model to ONNX and uploading...")
-                print(f"[INFO] Converting final model to ONNX...", flush=True)
+                print("[INFO] Converting final model to ONNX...", flush=True)
                 onnx_path = trainer.convert_to_onnx(model, pth_path)
                 if onnx_path and onnx_path.exists():
-                    logger.info("Uploading final best model to server...")
-                    print(f"[INFO] Uploading final best model (accuracy: {trainer.best_accuracy:.2f}%)...", flush=True)
                     upload_success = trainer.upload_model_to_server(onnx_path, trainer.best_accuracy, 'onnx')
-                    
-                    if upload_success:
-                        logger.info("Final model uploaded successfully!")
-                        print(f"[OK] Final model uploaded successfully!", flush=True)
-                    else:
-                        logger.warning("Final model upload failed, but model is saved locally")
-                        print(f"[WARN] Final model upload failed, but model is saved locally", flush=True)
-                    
-                    # Also copy to standard location
-                    standard_model_path = script_dir / "models" / "best.onnx"
                     try:
-                        shutil.copy2(onnx_path, standard_model_path)
-                        logger.info(f"Copied model to standard location: {standard_model_path}")
-                        print(f"[OK] Model copied to standard location: best.onnx", flush=True)
+                        shutil.copy2(onnx_path, script_dir / "models" / "best.onnx")
                     except Exception as e:
                         logger.warning(f"Could not copy model to standard location: {e}")
-                        print(f"[WARN] Could not copy model to standard location: {e}", flush=True)
                 else:
                     logger.error("Failed to convert model to ONNX — attempting .pth upload fallback")
-                    print("[ERROR] Failed to convert model to ONNX; uploading .pth fallback", flush=True)
                     upload_success = trainer.upload_model_to_server(
                         pth_path, trainer.best_accuracy, "pth"
                     )
-                    if upload_success:
-                        logger.info("Uploaded .pth fallback successfully (convert to ONNX offline if needed)")
-                    else:
-                        logger.error("Both ONNX convert and .pth upload failed")
             else:
                 logger.error("No model file found after training!")
-                print(f"[ERROR] No model file found after training!", flush=True)
+                print("[ERROR] No model file found after training!", flush=True)
+        else:
+            logger.error("Training finished with no best accuracy — nothing to activate")
         
-        # Update job status to completed
-        update_job_status(args.job_id, 'completed')
-        logger.info(f"Training job {args.job_id} completed successfully!")
-        print(f"[OK] Training job {args.job_id} completed!", flush=True)
+        if upload_success:
+            update_job_status(args.job_id, 'completed')
+            logger.info(f"Training job {args.job_id} completed — model activated as current")
+            print(f"[OK] Training job {args.job_id} completed! Model is now the active/current model.", flush=True)
+        else:
+            err = "Training finished but model upload/activation failed — model was NOT set as current"
+            logger.error(err)
+            update_job_status(args.job_id, 'failed', err)
+            print(f"[ERROR] {err}", flush=True)
+            sys.exit(1)
         
     except Exception as e:
         # Ensure error message is ASCII-safe
